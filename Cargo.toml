@@ -1,0 +1,14 @@
+[package]
+name = "xv6-ichnos"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures = "0.3.32"
+iced = { version = "0.14.0", features = ["tokio"] }
+iced_aw = { version = "0.14.0", features = ["full"] }
+iced_fonts = { version = "0.3.0", features = ["codicon"] }
+num_enum = "0.7.6"
+strum = { version = "0.28.0", features = ["derive"] }
+tokio = { version = "1.52.1", features = ["net"] }
+tokio-util = { version = "0.7.18", features = ["codec"] }
