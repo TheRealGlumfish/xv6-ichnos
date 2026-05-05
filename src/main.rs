@@ -9,7 +9,7 @@ use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::stream;
 use iced::task::Task;
 use iced::time;
-use iced::widget::{button, center, column, container, row, text};
+use iced::widget::{center, column, container, row, text};
 use iced::{self, Alignment, Element, Length, Subscription};
 use iced_aw::{ICED_AW_FONT_BYTES, TabLabel, Tabs};
 use iced_fonts::CODICON_FONT_BYTES;
@@ -25,6 +25,7 @@ use std::time::Duration;
 // TODO: Add proper shutdown behavior, we want the app to exit gracefully if the user exits it (or due to some error),
 // specifically flush RPC responses so we don't leave the xv6 side hanging.
 // TODO: Remove the various unwraps and funnel errors through <dyn Error>
+// TODO: Disable all buttons in the "Disconnected" state
 
 const RPC_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(5);
 const RPC_CONNECT_MAX_ATTEMPTS: usize = 10;
@@ -80,6 +81,11 @@ enum Message {
     // Sidebar actions
     ProcRateChange(u64),
     RequestProcs,
+    OpenExec,
+    // Exec window actions
+    SetExec(String),
+    ClearExec,
+    RequestExec(String),
     // Process list actions
     SelectProcess(i32),
     DeleteProcess(i32),
@@ -94,11 +100,12 @@ enum Message {
 enum Status {
     Connecting,
     Connected(mpsc::Sender<RpcReq>),
-    Error(String),                          // Fatal error
-    RpcError(String, mpsc::Sender<RpcReq>), // Non-fatal error
+    Error(String),                                  // Fatal error
+    RpcError(String, Option<mpsc::Sender<RpcReq>>), // Non-fatal error
 }
 
 struct App {
+    // TODO: Organize these
     socket_path: String, // TODO: Remove or fix later
     status: Status,
     last_heartbeat: Option<i32>,
@@ -106,6 +113,7 @@ struct App {
     processes: BTreeMap<i32, TracedProcess>,
     selected_process: Option<i32>,
     selected_tab: TabId,
+    exec_modal: Option<String>,
 }
 
 impl Default for App {
@@ -120,6 +128,7 @@ impl Default for App {
             processes: BTreeMap::new(),
             selected_process: None,
             selected_tab: TabId::Syscalls,
+            exec_modal: None,
         }
     }
 }
@@ -133,15 +142,16 @@ impl App {
                 Task::none()
             }
             Message::RpcError(err) => {
-                if let Status::Connected(sender) = &self.status {
-                    self.status = Status::RpcError(err, sender.clone());
-                } else if let Status::RpcError(_, sender) = &self.status {
-                    self.status = Status::RpcError(err, sender.clone());
-                }
+                let sender = match &self.status {
+                    Status::Connected(s) => Some(s.clone()),
+                    Status::RpcError(_, s) => s.clone(),
+                    _ => None,
+                };
+                self.status = Status::RpcError(err, sender);
                 Task::none()
             }
             Message::ClearError => {
-                if let Status::RpcError(_, sender) = &self.status {
+                if let Status::RpcError(_, Some(sender)) = &self.status {
                     self.status = Status::Connected(sender.clone());
                 } else {
                     self.status = Status::Connecting;
@@ -155,6 +165,24 @@ impl App {
             Message::RequestMagic => self.send_rpc(RpcReq::Magic),
             Message::RequestHeartbeat => self.send_rpc(RpcReq::Heartbeat),
             Message::RequestProcs => self.send_rpc(RpcReq::PStat),
+            Message::OpenExec => {
+                self.exec_modal = Some(String::new());
+                Task::none()
+            }
+            Message::SetExec(input) => {
+                self.exec_modal = Some(input);
+                Task::none()
+            }
+            Message::ClearExec => {
+                self.exec_modal = None;
+                Task::none()
+            }
+            Message::RequestExec(file) => {
+                self.exec_modal = None;
+                // TODO: Maybe add a delay between these (sometimes the UI shows the ichnos process forking before the exec() call)
+                self.send_rpc(RpcReq::Exec(file))
+                    .chain(self.send_rpc(RpcReq::PStat))
+            }
             Message::RpcQueued => Task::none(),
             Message::NewHeartbeat(heartbeat) => {
                 self.last_heartbeat = Some(heartbeat);
@@ -167,7 +195,6 @@ impl App {
             Message::NewTrace(ref pid, events) => {
                 // TODO: Maybe just unwrap here?
                 if let Some(proc) = self.processes.get_mut(pid) {
-                    //     proc.trace_events = events;
                     proc.trace_events.extend(events);
                     println!(
                         "Updated trace events for PID {}: {:?}",
@@ -178,7 +205,10 @@ impl App {
                 }
                 Task::none()
             }
-            Message::KillProcess(pid) => self.send_rpc(RpcReq::Kill(pid)), // TODO: Maybe send a RequestProcs too
+            Message::KillProcess(pid) => self
+                // TODO: Maybe add a delay between these
+                .send_rpc(RpcReq::Kill(pid))
+                .chain(self.send_rpc(RpcReq::PStat)),
             Message::ProcRateChange(rate) => {
                 self.proc_period = rate;
                 Task::none()
@@ -254,35 +284,13 @@ impl App {
             Status::Error(err) => {
                 let status_bar = ui::status_bar("Disconnected", false, self.last_heartbeat);
                 let window = column![window, status_bar];
-                let popup = container(
-                    column![
-                        text("Fatal Error").size(20),
-                        text(err).style(text::danger),
-                        button("Exit").on_press(Message::Exit).style(button::danger),
-                    ]
-                    .spacing(16)
-                    .align_x(Alignment::Center),
-                )
-                .padding(20)
-                .style(container::rounded_box);
+                let popup = ui::fatal_error_modal(err);
                 ui::modal(window, popup, Message::Exit)
             }
             Status::RpcError(err, _) => {
                 let status_bar = ui::status_bar("Disconnected", false, self.last_heartbeat);
                 let window = column![window, status_bar];
-                let popup = container(
-                    column![
-                        text("Error").size(20),
-                        text(err).style(text::warning),
-                        button("Ok")
-                            .on_press(Message::ClearError)
-                            .style(button::primary),
-                    ]
-                    .spacing(16)
-                    .align_x(Alignment::Center),
-                )
-                .padding(20)
-                .style(container::rounded_box);
+                let popup = ui::error_modal(err);
                 ui::modal(window, popup, Message::ClearError)
             }
             Status::Connecting => {
@@ -295,7 +303,13 @@ impl App {
                     true,
                     self.last_heartbeat,
                 );
-                column![window, status_bar].into()
+                let window = column![window, status_bar];
+                if let Some(exec_input) = &self.exec_modal {
+                    let popup = ui::exec_modal(exec_input);
+                    ui::modal(window, popup, Message::ClearExec)
+                } else {
+                    window.into()
+                }
             }
         }
     }
@@ -452,6 +466,7 @@ fn rpc_worker() -> impl Stream<Item = Message> {
                             .send(Message::NewTrace(req.get_pid(), events))
                             .await
                             .unwrap(),
+                        RpcResp::Exec(pid) => println!("Exec: {}", pid), // TODO: Do something here, deal with errors
                     }
                 }
                 Err(err) => {

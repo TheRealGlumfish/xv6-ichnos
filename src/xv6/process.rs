@@ -63,7 +63,7 @@ impl TryFrom<&[u8]> for Process {
                     state @ (ProcstateEnum::UNUSED | ProcstateEnum::USED) => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("Invalid process state: {:?}", state),
+                            format!("Invalid process state {:?}", state),
                         ));
                     }
                     ProcstateEnum::SLEEPING => ProcessState::Sleeping,
@@ -81,7 +81,7 @@ impl TryFrom<&[u8]> for Process {
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Invalid process frame length: {:?}", frame.len()),
+                format!("Invalid process frame length {:?}", frame.len()),
             ))
         }
     }

@@ -191,7 +191,7 @@ impl TryFrom<&[u8]> for SyscallEvent {
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Invalid syscall event frame length: {}", frame.len()),
+                format!("Invalid syscall event frame length {}", frame.len()),
             ))
         }
     }

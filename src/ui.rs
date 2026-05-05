@@ -40,6 +40,58 @@ pub fn modal<'a>(
     .into()
 }
 
+pub fn fatal_error_modal<'a>(error: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+    container(
+        column![
+            text("Fatal Error").size(20),
+            text(error).style(text::danger),
+            button("Exit").on_press(Message::Exit).style(button::danger),
+        ]
+        .spacing(16)
+        .align_x(Alignment::Center),
+    )
+    .padding(20)
+    .style(container::rounded_box)
+    .into()
+}
+
+pub fn error_modal<'a>(error: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+    container(
+        column![
+            text("Error").size(20),
+            text(error).style(text::warning),
+            button("Ok")
+                .on_press(Message::ClearError)
+                .style(button::primary),
+        ]
+        .spacing(16)
+        .align_x(Alignment::Center),
+    )
+    .padding(20)
+    .style(container::rounded_box)
+    .into()
+}
+
+pub fn exec_modal<'a>(input: &str) -> Element<'a, Message> {
+    container(
+        column![
+            text("Spawn Process").size(20),
+            text_input("command", input)
+                .on_input(Message::SetExec)
+                .on_submit(Message::RequestExec(String::from(input)))
+                .width(Length::Fixed(300.0)),
+            button("Run") // TODO: Change the name
+                .on_press(Message::RequestExec(String::from(input)))
+                .style(button::primary),
+        ]
+        .spacing(16)
+        .align_x(Alignment::Center),
+    )
+    .padding(20)
+    .style(container::rounded_box)
+    .into()
+}
+
 pub fn status_bar<'a>(
     status: impl text::IntoFragment<'a>,
     success: bool,
@@ -117,15 +169,24 @@ fn sidebar_header<'a>(proc_period: &u64) -> Element<'a, Message> {
             tooltip::Position::Bottom
         )
         .delay(TOOLTIP_DELAY),
+        space().width(10),
         text("ms"),
+        space().width(10),
         tooltip(
             button(codicon::refresh()).on_press(Message::RequestProcs),
             "Refresh",
-            tooltip::Position::Right
+            tooltip::Position::Bottom
         )
         .delay(TOOLTIP_DELAY),
+        tooltip(
+            button(codicon::add())
+                .on_press(Message::OpenExec)
+                .style(button::success),
+            "Spawn new process",
+            tooltip::Position::Bottom
+        )
+        .delay(TOOLTIP_DELAY)
     ]
-    .spacing(10)
     .align_y(Alignment::Center)
     .into()
 }
@@ -142,6 +203,7 @@ fn process_list_element<'a>(process: &TracedProcess, selected: bool) -> Element<
         text(format!("{}", proc.state)), // TODO: Maybe color the state
         text(format!("{}", proc.sz)),
     ];
+    // TODO: Figure out what to do with zombie processes
     let button = if process.is_alive {
         button(codicon::close())
             .on_press(Message::KillProcess(proc.pid))
@@ -263,10 +325,10 @@ pub fn syscall_view<'a>(process: &'a TracedProcess) -> Element<'a, Message> {
         .padding(10)
         .height(Length::Fill)
         .width(Length::Fill)
-        .align_x(Alignment::Center)
-        .style(|theme| {
-            container::Style::default()
-                .background(theme.extended_palette().background.weakest.color)
-        });
+        .align_x(Alignment::Center);
+    // .style(|theme| {
+    //     container::Style::default()
+    //         .background(theme.extended_palette().background.weakest.color)
+    // });
     row![sidebar, syscall_list].into()
 }

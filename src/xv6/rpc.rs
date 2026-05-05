@@ -19,10 +19,11 @@ enum RpcTag {
     KILL,
     TRACE,
     GETTRACE,
+    EXEC,
 }
 
-impl From<RpcReq> for RpcTag {
-    fn from(req: RpcReq) -> Self {
+impl From<&RpcReq> for RpcTag {
+    fn from(req: &RpcReq) -> Self {
         match req {
             RpcReq::Magic => RpcTag::MAGIC,
             RpcReq::Heartbeat => RpcTag::HEARTBEAT,
@@ -30,6 +31,7 @@ impl From<RpcReq> for RpcTag {
             RpcReq::Kill(_) => RpcTag::KILL,
             RpcReq::Trace { .. } => RpcTag::TRACE,
             RpcReq::GetTrace(_) => RpcTag::GETTRACE,
+            RpcReq::Exec(_) => RpcTag::EXEC,
         }
     }
 }
@@ -43,6 +45,7 @@ pub enum RpcReq {
     Kill(i32),
     Trace { mask: u32, pid: i32 },
     GetTrace(i32),
+    Exec(String),
 }
 
 /// A conversion of an `RpcReq` to bytes for sending over the RPC channel.
@@ -50,26 +53,33 @@ impl From<RpcReq> for Bytes {
     fn from(req: RpcReq) -> Self {
         match req {
             RpcReq::Magic | RpcReq::Heartbeat | RpcReq::PStat => {
-                Bytes::copy_from_slice(&[RpcTag::from(req).into()])
+                Bytes::copy_from_slice(&[RpcTag::from(&req).into()])
             }
             RpcReq::Kill(pid) => {
                 let mut payload = BytesMut::with_capacity(5);
-                payload.put_u8(RpcTag::from(req).into());
+                payload.put_u8(RpcTag::from(&req).into());
                 payload.put_i32_le(pid);
                 payload.freeze()
             }
             RpcReq::Trace { mask, pid } => {
                 println!("[RpcReq::Trace] mask: {:#b}, pid: {}", mask, pid);
                 let mut payload = BytesMut::with_capacity(9);
-                payload.put_u8(RpcTag::from(req).into());
+                payload.put_u8(RpcTag::from(&req).into());
                 payload.put_i32_le(pid);
                 payload.put_u32_le(mask);
                 payload.freeze()
             }
             RpcReq::GetTrace(pid) => {
                 let mut payload = BytesMut::with_capacity(5);
-                payload.put_u8(RpcTag::from(req).into());
+                payload.put_u8(RpcTag::from(&req).into());
                 payload.put_i32_le(pid);
+                payload.freeze()
+            }
+            RpcReq::Exec(ref file) => {
+                let mut payload = BytesMut::with_capacity(1 + file.len() + 1);
+                payload.put_u8(RpcTag::from(&req).into());
+                payload.extend_from_slice(file.as_bytes());
+                payload.put_u8(b'\0');
                 payload.freeze()
             }
         }
@@ -98,6 +108,7 @@ pub enum RpcResp {
     Kill(bool),
     Trace(bool),
     GetTrace(Vec<Syscall>),
+    Exec(i32), // TODO: Can we ever return an error message here? Maybe we should return the PID?
 }
 
 /// A conversion of bytes received from the RPC channel to an `RpcResp`.
@@ -177,6 +188,16 @@ impl TryFrom<BytesMut> for RpcResp {
                     Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("GetTrace response has invalid length {}", payload.len()),
+                    ))
+                }
+            }
+            RpcTag::EXEC => {
+                if payload.len() == mem::size_of::<i32>() {
+                    Ok(RpcResp::Exec(payload.get_i32_le()))
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Exec response has invalid length {}", payload.len()),
                     ))
                 }
             }
