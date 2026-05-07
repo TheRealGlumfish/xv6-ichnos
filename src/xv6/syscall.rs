@@ -50,6 +50,7 @@ pub enum SyscallNum {
     SYS_pstat = 22,
     SYS_trace = 23,
     SYS_gettrace = 24,
+    SYS_meminfo = 25,
 }
 
 impl SyscallNum {
@@ -124,6 +125,7 @@ impl SyscallNum {
             SyscallNum::SYS_pstat => "Place info about the running processes into *buf.",
             SyscallNum::SYS_trace => "Set the trace mask for a process.",
             SyscallNum::SYS_gettrace => "Put up to n trace events from a process into *buf.",
+            SyscallNum::SYS_meminfo => "Put the memory layout of process with PID into *info.",
         }
     }
 }
@@ -155,6 +157,7 @@ impl From<&Syscall> for SyscallNum {
             Syscall::PStat { .. } => SyscallNum::SYS_pstat,
             Syscall::Trace { .. } => SyscallNum::SYS_trace,
             Syscall::GetTrace { .. } => SyscallNum::SYS_gettrace,
+            Syscall::MemInfo { .. } => SyscallNum::SYS_meminfo,
         }
     }
 }
@@ -312,6 +315,11 @@ pub enum Syscall {
         buf: u64,
         size: i32,
     },
+    MemInfo {
+        retval: i32,
+        pid: i32,
+        info: u64,
+    },
 }
 
 impl Syscall {
@@ -364,6 +372,7 @@ impl Syscall {
             Syscall::PStat { .. } => "Place info about the running processes into *buf.",
             Syscall::Trace { .. } => "Set the trace mask for a process.",
             Syscall::GetTrace { .. } => "Put up to n trace events from a process into *buf.",
+            Syscall::MemInfo { .. } => "Put the memory layout of process with PID into *info.",
         }
     }
 
@@ -495,6 +504,13 @@ impl Syscall {
                 size,
                 retval
             ),
+            Syscall::MemInfo { retval, pid, info } => format!(
+                "{}(pid: {}, info: {:X}) -> {}",
+                self.name(),
+                pid,
+                info,
+                retval
+            ),
         }
     }
 }
@@ -619,6 +635,11 @@ impl From<SyscallEvent> for Syscall {
                 pid: event.args[0] as i32,
                 buf: event.args[1],
                 size: event.args[2] as i32,
+            },
+            SyscallNum::SYS_meminfo => Syscall::MemInfo {
+                retval: event.retval as i32,
+                pid: event.args[0] as i32,
+                info: event.args[1],
             },
         }
     }
