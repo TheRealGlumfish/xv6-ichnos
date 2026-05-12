@@ -1,8 +1,9 @@
 mod ui;
 mod xv6;
 
+use xv6::memory::MemoryInfo;
 use xv6::process::Process;
-use xv6::rpc::{RpcHandler, RpcReq, RpcResp};
+use xv6::rpc::{MAGIC, RpcHandler, RpcReq, RpcResp};
 use xv6::syscall::Syscall;
 
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
@@ -32,9 +33,10 @@ const RPC_CONNECT_MAX_ATTEMPTS: usize = 10;
 
 struct TracedProcess {
     process: Process,
-    trace_mask: u32, // Big assumption here (that we only trace through xv6-ichnos and in one go) // TODO: Maybe add an "untraced" state while still holding UI state of the checkboxes?
+    trace_mask: u32,
     trace_events: Vec<Syscall>,
     is_alive: bool,
+    memory: Option<MemoryInfo>,
 }
 
 impl TracedProcess {
@@ -44,12 +46,12 @@ impl TracedProcess {
             trace_mask: 0,
             trace_events: Vec::new(),
             is_alive: true,
+            memory: None,
         }
     }
 }
 
 impl TracedProcess {
-    // TODO: Maybe remove?
     fn is_traced(&self) -> bool {
         self.trace_mask != 0
     }
@@ -66,16 +68,17 @@ enum Message {
     Exit,
     Connected(mpsc::Sender<RpcReq>),
     RequestHeartbeat,
-    RequestMagic, // TODO: Hook this up
+    RequestMagic,
     // Errors (from UI or RPC worker)
     ExitError(String),
-    RpcError(String),
+    RpcError(String, bool),
     // TODO: Name this
     RpcQueued,
     // RPC responses
     NewHeartbeat(i32),
     NewProcs(Vec<Process>),
     NewTrace(i32, Vec<Syscall>),
+    NewMemInfo(i32, MemoryInfo),
     // Popup actions
     ClearError,
     // Sidebar actions
@@ -95,6 +98,8 @@ enum Message {
     // System call actions
     ChangeTraceMask(i32, u32),
     RefreshTrace(i32),
+    // Memory actions
+    RefreshMemory(i32),
 }
 
 enum Status {
@@ -141,11 +146,15 @@ impl App {
                 self.status = Status::Error(err);
                 Task::none()
             }
-            Message::RpcError(err) => {
-                let sender = match &self.status {
-                    Status::Connected(s) => Some(s.clone()),
-                    Status::RpcError(_, s) => s.clone(),
-                    _ => None,
+            Message::RpcError(err, keep_connected) => {
+                let sender = if keep_connected {
+                    match &self.status {
+                        Status::Connected(s) => Some(s.clone()),
+                        Status::RpcError(_, s) => s.clone(),
+                        _ => None,
+                    }
+                } else {
+                    None
                 };
                 self.status = Status::RpcError(err, sender);
                 Task::none()
@@ -205,6 +214,14 @@ impl App {
                 }
                 Task::none()
             }
+            Message::NewMemInfo(pid, meminfo) => {
+                if let Some(proc) = self.processes.get_mut(&pid) {
+                    proc.memory = Some(meminfo);
+                } else {
+                    todo!() // TODO: Display an error here
+                }
+                Task::none()
+            }
             Message::KillProcess(pid) => self
                 // TODO: Maybe add a delay between these
                 .send_rpc(RpcReq::Kill(pid))
@@ -242,6 +259,7 @@ impl App {
                 }
             }
             Message::RefreshTrace(pid) => self.send_rpc(RpcReq::GetTrace(pid)),
+            Message::RefreshMemory(pid) => self.send_rpc(RpcReq::MemInfo(pid)),
         }
     }
 
@@ -269,7 +287,11 @@ impl App {
                 .push(
                     TabId::Memory,
                     TabLabel::IconText('\u{1f4df}', String::from("Memory")),
-                    "empty",
+                    ui::memory_view(
+                        self.processes
+                            .get(&selected_pid)
+                            .expect("Process should exist if selected"),
+                    ),
                 )
                 .set_active_tab(&self.selected_tab)
                 .into()
@@ -331,7 +353,9 @@ impl App {
             let mut sender = sender.clone();
             Task::perform(async move { sender.send(req).await }, |res| match res {
                 Ok(_) => Message::RpcQueued,
-                Err(err) => Message::RpcError(format!("Failed to send RPC request: {}", err)),
+                Err(err) => {
+                    Message::RpcError(format!("Failed to send RPC request: {}", err), false)
+                }
             })
         } else {
             Task::none()
@@ -415,7 +439,7 @@ async fn connect_rpc_socket(
                         RPC_CONNECT_RETRY_DELAY.as_secs(),
                         attempt,
                         RPC_CONNECT_MAX_ATTEMPTS,
-                    )))
+                    ), false))
                     .await
                     .unwrap();
 
@@ -448,7 +472,18 @@ fn rpc_worker() -> impl Stream<Item = Message> {
                 Ok(resp) => {
                     match resp {
                         RpcResp::Magic(magic) => {
-                            println!("Magic: {:#x}", magic);
+                            if magic != MAGIC {
+                                output
+                                    .send(Message::RpcError(
+                                        format!(
+                                            "Invalid magic number 0x{:X} (expected: 0x{:X})",
+                                            magic, MAGIC
+                                        ),
+                                        true,
+                                    ))
+                                    .await
+                                    .unwrap();
+                            }
                         }
                         RpcResp::Heartbeat(ticks) => {
                             output.send(Message::NewHeartbeat(ticks)).await.unwrap()
@@ -458,7 +493,7 @@ fn rpc_worker() -> impl Stream<Item = Message> {
                         }
                         RpcResp::Kill(success) => {
                             // Kill triggers a refresh
-                            println!("Kill: {}", success); // TODO: Do smth here
+                            println!("Kill: {}", success); // TODO: Do smth here, i.e. if kill fails (kind of tricky)
                             output.send(Message::RequestProcs).await.unwrap(); // TODO: Maybe not do this here?
                         }
                         RpcResp::Trace(success) => println!("Trace: {}", success), // TODO: Do something here, deal with errors
@@ -467,11 +502,33 @@ fn rpc_worker() -> impl Stream<Item = Message> {
                             .await
                             .unwrap(),
                         RpcResp::Exec(pid) => println!("Exec: {}", pid), // TODO: Do something here, deal with errors
+                        RpcResp::MemInfo(resp) => {
+                            if let Some(meminfo) = resp {
+                                output
+                                    .send(Message::NewMemInfo(req.get_pid(), meminfo))
+                                    .await
+                                    .unwrap();
+                            } else {
+                                output
+                                    .send(Message::RpcError(
+                                        format!(
+                                            "Failed to get memory info for PID {}",
+                                            req.get_pid()
+                                        ),
+                                        true,
+                                    ))
+                                    .await
+                                    .unwrap();
+                            }
+                        }
                     }
                 }
                 Err(err) => {
                     output
-                        .send(Message::RpcError(format!("RPC failed: {}", err)))
+                        .send(Message::RpcError(
+                            format!("RPC failed: {}", err),
+                            err.kind() == std::io::ErrorKind::InvalidData,
+                        ))
                         .await
                         .unwrap();
 

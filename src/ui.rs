@@ -1,6 +1,8 @@
+use crate::xv6::memory::MemoryRange;
 use crate::xv6::syscall::{self, SyscallNum};
 use crate::{Message, TracedProcess};
 
+use iced::border::{self, Border};
 use iced::widget::{
     button, center, checkbox, column, container, mouse_area, opaque, row, scrollable, space, stack,
     text, text_input, tooltip,
@@ -10,9 +12,10 @@ use iced_aw::NumberInput;
 use iced_fonts::codicon;
 use strum::IntoEnumIterator;
 
+use core::str;
 use std::time::Duration;
 
-const TOOLTIP_DELAY: Duration = Duration::from_secs(2);
+const TOOLTIP_DELAY: Duration = Duration::from_secs(1);
 
 pub fn modal<'a>(
     base: impl Into<Element<'a, Message>>,
@@ -92,21 +95,14 @@ pub fn exec_modal<'a>(input: &str) -> Element<'a, Message> {
     .into()
 }
 
-pub fn status_bar<'a>(
-    status: impl text::IntoFragment<'a>,
+fn status_bar_button<'a>(
     success: bool,
-    last_heartbeat: Option<i32>,
+    content: impl Into<Element<'a, Message>>,
+    on_press: Message,
+    tooltip_text: &'static str,
 ) -> Element<'a, Message> {
-    let status_text = container(text(status).size(14)).padding(5);
-
-    let last_heartbeat = if let Some(heartbeat) = last_heartbeat {
-        format!("{} ticks", heartbeat)
-    } else {
-        String::from("N/A")
-    };
-    let heartbeat_text = text!("Last heartbeat: {}", last_heartbeat).size(14);
-    let heartbeat_button = button(heartbeat_text)
-        .on_press(Message::RequestHeartbeat)
+    let button = button(content)
+        .on_press(on_press)
         .padding(5)
         .height(Length::Fill)
         .style(move |theme: &Theme, status| {
@@ -145,8 +141,51 @@ pub fn status_bar<'a>(
                 }
             }
         });
+    tooltip(button, tooltip_text, tooltip::Position::Top)
+        .delay(TOOLTIP_DELAY)
+        .style(container::bordered_box)
+        .into()
+}
 
-    let status_bar = row![status_text, space::horizontal(), heartbeat_button];
+pub fn status_bar<'a>(
+    status: impl text::IntoFragment<'a>,
+    success: bool,
+    last_heartbeat: Option<i32>,
+) -> Element<'a, Message> {
+    let status_text: Element<'_, Message> = if success {
+        text(status).size(14).into()
+    } else {
+        row![codicon::debug_disconnect().size(14), text(status).size(14)]
+            .spacing(5)
+            .into()
+    };
+    let status_text = container(status_text).padding(5);
+
+    let last_heartbeat = if let Some(heartbeat) = last_heartbeat {
+        format!("{} ticks", heartbeat)
+    } else {
+        String::from("N/A")
+    };
+    let heartbeat_text = text!("Last heartbeat: {}", last_heartbeat).size(14);
+    let heartbeat_button = status_bar_button(
+        success,
+        heartbeat_text,
+        Message::RequestHeartbeat,
+        "Request a heartbeat from xv6",
+    );
+    let magic_button = status_bar_button(
+        success,
+        codicon::remote(),
+        Message::RequestMagic,
+        "Test the connection by sending a magic RPC request",
+    );
+
+    let status_bar = row![
+        status_text,
+        space::horizontal(),
+        magic_button,
+        heartbeat_button
+    ];
 
     container(status_bar)
         .width(Length::Fill)
@@ -168,7 +207,8 @@ fn sidebar_header<'a>(proc_period: &u64) -> Element<'a, Message> {
             "Refresh rate (ms)",
             tooltip::Position::Bottom
         )
-        .delay(TOOLTIP_DELAY),
+        .delay(TOOLTIP_DELAY)
+        .style(container::bordered_box),
         space().width(10),
         text("ms"),
         space().width(10),
@@ -177,7 +217,8 @@ fn sidebar_header<'a>(proc_period: &u64) -> Element<'a, Message> {
             "Refresh",
             tooltip::Position::Bottom
         )
-        .delay(TOOLTIP_DELAY),
+        .delay(TOOLTIP_DELAY)
+        .style(container::bordered_box),
         tooltip(
             button(codicon::add())
                 .on_press(Message::OpenExec)
@@ -186,6 +227,7 @@ fn sidebar_header<'a>(proc_period: &u64) -> Element<'a, Message> {
             tooltip::Position::Bottom
         )
         .delay(TOOLTIP_DELAY)
+        .style(container::bordered_box),
     ]
     .align_y(Alignment::Center)
     .into()
@@ -213,7 +255,23 @@ fn process_list_element<'a>(process: &TracedProcess, selected: bool) -> Element<
             .on_press(Message::DeleteProcess(proc.pid))
             .style(button::danger)
     };
-    let elem = row![content, space::horizontal(), button].align_y(Alignment::Center);
+    let icon = if process.is_alive {
+        if process.is_traced() {
+            codicon::debug()
+        } else {
+            codicon::heart_filled()
+        }
+    } else {
+        codicon::heart() // TODO: Change this to something better
+    };
+    let elem = row![
+        content,
+        space::horizontal(),
+        icon,
+        space().width(Length::Fixed(10.0)),
+        button
+    ]
+    .align_y(Alignment::Center);
     let elem = container(elem)
         .width(Length::Fill)
         .padding(10)
@@ -272,15 +330,17 @@ pub fn syscall_view<'a>(process: &'a TracedProcess) -> Element<'a, Message> {
         // .size(18);
         tooltip(checkbox, syscall.description(), tooltip::Position::Right)
             .delay(TOOLTIP_DELAY)
+            .style(container::bordered_box)
             .into()
     });
     let checkboxes = scrollable(column(checkboxes).width(Length::Fill));
     let sidebar = column![
-        text("Trace Controls")
+        text("Trace Controls") // TODO: Disable these if not alive
             .size(16)
             .width(Length::Fill)
             .align_x(Alignment::Center),
         row![
+            // TODO: Add tooltips
             button("Enable")
                 .on_press(Message::ChangeTraceMask(
                     process.process.pid,
@@ -331,4 +391,89 @@ pub fn syscall_view<'a>(process: &'a TracedProcess) -> Element<'a, Message> {
     //         .background(theme.extended_palette().background.weakest.color)
     // });
     row![sidebar, syscall_list].into()
+}
+
+// TODO: On contiguous memory segments it would look nicer to have a ptr in between them.
+pub fn memory_segment_view<'a>(segment: MemoryRange) -> Element<'a, Message> {
+    container(
+        column![
+            text!("0x{:010X}", segment.end())
+                .size(10)
+                .style(text::secondary),
+            space().height(2),
+            text(segment.name()).size(12), // TODO: Color this?
+            text!("{} B", segment.size()).size(10),
+            text(segment.permissions().to_string())
+                .size(10)
+                .style(text::secondary),
+            space().height(2),
+            text!("0x{:010X}", segment.start())
+                .size(10)
+                .style(text::secondary),
+        ]
+        .width(Length::Fill)
+        .align_x(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .style(container::bordered_box)
+    .style(|theme| {
+        let palette = theme.extended_palette();
+        container::Style::default()
+            .background(palette.background.base.color)
+            .border(Border {
+                color: if palette.is_dark {
+                    Color::WHITE
+                } else {
+                    Color::BLACK
+                },
+                width: 3.0,
+                radius: border::radius(0.0),
+            })
+    })
+    .padding(5)
+    .into()
+}
+
+pub fn memory_layout_view<'a>(segments: impl Iterator<Item = MemoryRange>) -> Element<'a, Message> {
+    let segments = column(segments.map(memory_segment_view))
+        .width(Length::Fixed(100.0))
+        .spacing(5);
+    scrollable(segments).spacing(5).into()
+}
+
+pub fn memory_view<'a>(process: &'a TracedProcess) -> Element<'a, Message> {
+    row![
+        button(codicon::refresh()).on_press(Message::RefreshMemory(process.process.pid)),
+        if let Some(memory) = &process.memory {
+            let elems: Element<'a, Message> = row![
+                space::horizontal(),
+                column![
+                    text("User Virtual Memory"),
+                    memory_layout_view(memory.layout().into_iter().rev()),
+                ]
+                .align_x(Alignment::Center)
+                .spacing(20),
+                space::horizontal(),
+                column![
+                    text("Virtual Kernel Memory"),
+                    memory_layout_view(memory.layout_kernel().into_iter().rev())
+                ]
+                .align_x(Alignment::Center)
+                .spacing(20),
+                space::horizontal(),
+                column![
+                    text("Physical Memory"),
+                    memory_layout_view(memory.layout_physical().into_iter().rev())
+                ]
+                .align_x(Alignment::Center)
+                .spacing(20),
+                space::horizontal(),
+            ]
+            .into();
+            elems
+        } else {
+            center(text("No memory information available, reload")).into()
+        }
+    ]
+    .into()
 }

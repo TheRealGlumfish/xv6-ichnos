@@ -1,3 +1,6 @@
+use crate::xv6::memory::MemoryInfo;
+
+use super::memory::MemInfo;
 use super::syscall::{Syscall, SyscallEvent};
 use super::{process, process::Process};
 
@@ -8,6 +11,9 @@ use tokio_util::bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use std::{io, mem};
+
+/// xv6-ichnos RPC protocol magic number.
+pub const MAGIC: u32 = 0x67676767;
 
 #[allow(clippy::upper_case_acronyms)] // TODO: Decide on the naming convention for these "C" types
 #[derive(TryFromPrimitive, IntoPrimitive)]
@@ -20,6 +26,7 @@ enum RpcTag {
     TRACE,
     GETTRACE,
     EXEC,
+    MEMINFO,
 }
 
 impl From<&RpcReq> for RpcTag {
@@ -32,6 +39,7 @@ impl From<&RpcReq> for RpcTag {
             RpcReq::Trace { .. } => RpcTag::TRACE,
             RpcReq::GetTrace(_) => RpcTag::GETTRACE,
             RpcReq::Exec(_) => RpcTag::EXEC,
+            RpcReq::MemInfo(_) => RpcTag::MEMINFO,
         }
     }
 }
@@ -46,6 +54,7 @@ pub enum RpcReq {
     Trace { mask: u32, pid: i32 },
     GetTrace(i32),
     Exec(String),
+    MemInfo(i32),
 }
 
 /// A conversion of an `RpcReq` to bytes for sending over the RPC channel.
@@ -82,6 +91,12 @@ impl From<RpcReq> for Bytes {
                 payload.put_u8(b'\0');
                 payload.freeze()
             }
+            RpcReq::MemInfo(pid) => {
+                let mut payload = BytesMut::with_capacity(5);
+                payload.put_u8(RpcTag::from(&req).into());
+                payload.put_i32_le(pid);
+                payload.freeze()
+            }
         }
     }
 }
@@ -94,6 +109,7 @@ impl RpcReq {
             RpcReq::Kill(pid) => *pid,
             RpcReq::Trace { pid, .. } => *pid,
             RpcReq::GetTrace(pid) => *pid,
+            RpcReq::MemInfo(pid) => *pid,
             _ => panic!("This request type does not have an associated PID"),
         }
     }
@@ -109,6 +125,7 @@ pub enum RpcResp {
     Trace(bool),
     GetTrace(Vec<Syscall>),
     Exec(i32), // TODO: Can we ever return an error message here? Maybe we should return the PID?
+    MemInfo(Option<MemoryInfo>),
 }
 
 /// A conversion of bytes received from the RPC channel to an `RpcResp`.
@@ -199,6 +216,15 @@ impl TryFrom<BytesMut> for RpcResp {
                         io::ErrorKind::InvalidData,
                         format!("Exec response has invalid length {}", payload.len()),
                     ))
+                }
+            }
+            RpcTag::MEMINFO => {
+                if payload.is_empty() {
+                    Ok(RpcResp::MemInfo(None))
+                } else {
+                    Ok(RpcResp::MemInfo(Some(MemoryInfo::from(MemInfo::try_from(
+                        payload,
+                    )?))))
                 }
             }
         }
