@@ -1,7 +1,8 @@
 use crate::xv6::memory::MemoryInfo;
+use crate::xv6::syscall::SYSCALL_EVENT_SZ;
 
 use super::memory::MemInfo;
-use super::syscall::{Syscall, SyscallEvent};
+use super::syscall::SyscallEvent;
 use super::{process, process::Process};
 
 use futures::{SinkExt, StreamExt};
@@ -123,7 +124,7 @@ pub enum RpcResp {
     PStat(Vec<Process>),
     Kill(bool),
     Trace(bool),
-    GetTrace(Vec<Syscall>),
+    GetTrace(Vec<SyscallEvent>),
     Exec(i32), // TODO: Can we ever return an error message here? Maybe we should return the PID?
     MemInfo(Option<MemoryInfo>),
 }
@@ -193,13 +194,12 @@ impl TryFrom<BytesMut> for RpcResp {
                 }
             }
             RpcTag::GETTRACE => {
-                if payload.len().is_multiple_of(64) {
+                if payload.len().is_multiple_of(SYSCALL_EVENT_SZ) {
                     Ok(RpcResp::GetTrace(
                         payload
-                            .chunks_exact(64)
+                            .chunks_exact(SYSCALL_EVENT_SZ)
                             .map(SyscallEvent::try_from)
-                            .map(|res| res.map(Syscall::from))
-                            .collect::<io::Result<Vec<Syscall>>>()?,
+                            .collect::<io::Result<Vec<SyscallEvent>>>()?,
                     ))
                 } else {
                     Err(io::Error::new(

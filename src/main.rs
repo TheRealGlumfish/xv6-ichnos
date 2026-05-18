@@ -1,10 +1,10 @@
 mod ui;
-mod xv6;
+pub mod xv6;
 
 use xv6::memory::MemoryInfo;
 use xv6::process::Process;
 use xv6::rpc::{MAGIC, RpcHandler, RpcReq, RpcResp};
-use xv6::syscall::Syscall;
+use xv6::syscall::SyscallEvent;
 
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::stream;
@@ -34,9 +34,10 @@ const RPC_CONNECT_MAX_ATTEMPTS: usize = 10;
 struct TracedProcess {
     process: Process,
     trace_mask: u32,
-    trace_events: Vec<Syscall>,
+    trace_events: Vec<SyscallEvent>,
     is_alive: bool,
     memory: Option<MemoryInfo>,
+    selected_syscall: Option<usize>,
 }
 
 impl TracedProcess {
@@ -47,6 +48,7 @@ impl TracedProcess {
             trace_events: Vec::new(),
             is_alive: true,
             memory: None,
+            selected_syscall: None,
         }
     }
 }
@@ -77,7 +79,7 @@ enum Message {
     // RPC responses
     NewHeartbeat(i32),
     NewProcs(Vec<Process>),
-    NewTrace(i32, Vec<Syscall>),
+    NewTrace(i32, Vec<SyscallEvent>),
     NewMemInfo(i32, MemoryInfo),
     // Popup actions
     ClearError,
@@ -98,6 +100,7 @@ enum Message {
     // System call actions
     ChangeTraceMask(i32, u32),
     RefreshTrace(i32),
+    SelectSyscall(i32, usize),
     // Memory actions
     RefreshMemory(i32),
 }
@@ -205,10 +208,6 @@ impl App {
                 // TODO: Maybe just unwrap here?
                 if let Some(proc) = self.processes.get_mut(pid) {
                     proc.trace_events.extend(events);
-                    println!(
-                        "Updated trace events for PID {}: {:?}",
-                        pid, proc.trace_events
-                    );
                 } else {
                     todo!() // TODO: Display an error here
                 }
@@ -253,12 +252,21 @@ impl App {
             Message::ChangeTraceMask(pid, mask) => {
                 if let Some(proc) = self.processes.get_mut(&pid) {
                     proc.trace_mask = mask;
+                    // TODO: We should fetch the tracebuffer here so if we are disabling the tracebuffer we don't "loose" any syscalls
                     self.send_rpc(RpcReq::Trace { pid, mask })
                 } else {
                     Task::none() // TODO: Throw an error or panic?
                 }
             }
             Message::RefreshTrace(pid) => self.send_rpc(RpcReq::GetTrace(pid)),
+            Message::SelectSyscall(pid, idx) => {
+                // TODO: Add a "clearing" mechanism
+                self.processes
+                    .get_mut(&pid)
+                    .expect("Process should exist if syscall is selected")
+                    .selected_syscall = Some(idx);
+                Task::none()
+            }
             Message::RefreshMemory(pid) => self.send_rpc(RpcReq::MemInfo(pid)),
         }
     }

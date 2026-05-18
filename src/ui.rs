@@ -1,5 +1,5 @@
-use crate::xv6::memory::MemoryRange;
-use crate::xv6::syscall::{self, SyscallNum};
+use crate::xv6::memory::{MemoryInfo, MemoryRange, SegmentType};
+use crate::xv6::syscall::{self, Syscall, SyscallEvent, SyscallNum};
 use crate::{Message, TracedProcess};
 
 use iced::border::{self, Border};
@@ -7,7 +7,7 @@ use iced::widget::{
     button, center, checkbox, column, container, mouse_area, opaque, row, scrollable, space, stack,
     text, text_input, tooltip,
 };
-use iced::{Alignment, Background, Color, Element, Length, Theme};
+use iced::{Alignment, Background, Color, Element, Length, Theme, color};
 use iced_aw::NumberInput;
 use iced_fonts::codicon;
 use strum::IntoEnumIterator;
@@ -298,9 +298,8 @@ pub fn sidebar<'a>(
     let process_list: Element<'a, Message> = if procs.len() == 0 {
         center(text("No running processes").style(text::secondary)).into()
     } else {
-        // TODO: Switch to if let here i.e. don't rely on there not being a process with PID -1
         scrollable(column(procs.map(|proc| {
-            process_list_element(proc, proc.process.pid == selected_process.unwrap_or(-1))
+            process_list_element(proc, Some(proc.process.pid) == selected_process)
         })))
         .into()
     };
@@ -312,6 +311,124 @@ pub fn sidebar<'a>(
                 .background(theme.extended_palette().background.weakest.color)
         });
     column![sidebar_header(proc_period), process_list].into()
+}
+
+pub fn syscall_list_element<'a>(
+    syscall: &Syscall,
+    pid: i32,
+    idx: usize,
+    selected: bool,
+) -> Element<'a, Message> {
+    let elem = button(text(syscall.short_fmt()).size(14))
+        .width(Length::Fill)
+        .style(move |theme: &Theme, status| {
+            let palette = theme.extended_palette();
+
+            if selected {
+                button::Style {
+                    background: Some(Background::Color(palette.background.strong.color)),
+                    ..button::subtle(theme, status)
+                }
+            } else {
+                button::subtle(theme, status)
+            }
+        })
+        .on_press(Message::SelectSyscall(pid, idx));
+    tooltip(elem, syscall.description(), tooltip::Position::FollowCursor)
+        .delay(TOOLTIP_DELAY)
+        .style(container::bordered_box)
+        .into()
+}
+
+// TODO: Maybe make a "wrapper" of the outside box to use for both this and memory segments
+fn trapframe_view<'a>(event: &SyscallEvent) -> Element<'a, Message> {
+    let segment = MemoryInfo::trapframe();
+    let elem = container(
+        column![
+            text!("0x{:010X}", segment.end())
+                .size(10)
+                .style(text::secondary),
+            space().height(2),
+            text("Trapframe").size(12), // TODO: Color this?
+            space().height(2),
+            text!("kernel_sp: 0x{:010X}", event.kernel_sp).size(10), // TODO: Left align these
+            text("⋮").size(10),
+            text!("epc: 0x{:010X}", event.pc).size(10),
+            text!("sp: 0x{:010X}", event.sp).size(10), // TODO: Left align these
+            text("⋮").size(10),
+            text!("a0: 0x{:010X}", event.a0()).size(10),
+            text!("a1: 0x{:010X}", event.a1()).size(10),
+            text!("a2: 0x{:010X}", event.a2()).size(10),
+            text!("a3: 0x{:010X}", event.a3()).size(10),
+            text!("a4: 0x{:010X}", event.a4()).size(10),
+            text!("a5: 0x{:010X}", event.a5()).size(10),
+            text("⋮").size(10),
+            text!("a7: 0x{:010X}", event.a7()).size(10),
+            space().height(2),
+            text(segment.permissions().to_string())
+                .size(10)
+                .style(text::secondary),
+            space().height(2),
+            text!("0x{:010X}", segment.start())
+                .size(10)
+                .style(text::secondary),
+        ]
+        .width(Length::Fill)
+        .align_x(Alignment::Center),
+    )
+    .style(container::bordered_box)
+    .style(|theme| {
+        let palette = theme.extended_palette();
+        container::Style::default()
+            .background(palette.background.base.color)
+            .border(Border {
+                color: if palette.is_dark {
+                    Color::WHITE
+                } else {
+                    Color::BLACK
+                },
+                width: 3.0,
+                radius: border::radius(0.0),
+            })
+    })
+    .width(Length::Fixed(175.0))
+    .padding(5);
+    let jump_text = container(
+        column![
+            text("Context Switch").size(12),
+            space().height(2),
+            text!("pc: 0x{:010X}→0x{:010X}", event.pc, event.kernel_pc).size(10),
+            text!("sp: 0x{:010X}→0x{:010X}", event.sp, event.kernel_sp).size(10),
+        ]
+        .width(Length::Fill)
+        .align_x(Alignment::Center),
+    )
+    .style(container::bordered_box)
+    .style(|theme| {
+        let palette = theme.extended_palette();
+        container::Style::default()
+            .background(palette.background.base.color)
+            .border(Border {
+                color: if palette.is_dark {
+                    Color::WHITE
+                } else {
+                    Color::BLACK
+                },
+                width: 3.0,
+                radius: border::radius(0.0),
+            })
+    })
+    .width(Length::Fixed(175.0))
+    .padding(5);
+    let elem = column![elem, jump_text,].spacing(5);
+    tooltip(
+        elem,
+        "Trapframe at the time of system call",
+        tooltip::Position::Left,
+    ) // TODO: Add text and change to follow cursor
+    .delay(TOOLTIP_DELAY)
+    .style(container::bordered_box)
+    .into()
 }
 
 pub fn syscall_view<'a>(process: &'a TracedProcess) -> Element<'a, Message> {
@@ -326,8 +443,8 @@ pub fn syscall_view<'a>(process: &'a TracedProcess) -> Element<'a, Message> {
                 };
                 Message::ChangeTraceMask(process.process.pid, mask)
             })
-            .text_size(18); // TODO: Investigate increasing text size
-        // .size(18);
+            .text_size(18)
+            .size(18);
         tooltip(checkbox, syscall.description(), tooltip::Position::Right)
             .delay(TOOLTIP_DELAY)
             .style(container::bordered_box)
@@ -368,40 +485,74 @@ pub fn syscall_view<'a>(process: &'a TracedProcess) -> Element<'a, Message> {
         .padding(10)
         .width(Length::Shrink)
         .height(Length::Fill);
-    let syscall_list: Element<'a, Message> = if !process.trace_events.is_empty() {
-        // TODO: Allow users to sort either in increasing or decreasing time (currently it shows oldest -> newest)
-        let list = column(
-            process
-                .trace_events
-                .iter()
-                .map(|event| text(event.short_fmt()).into()),
-        )
-        .spacing(5);
-        scrollable(list).spacing(5).into()
-    } else {
-        center(text("No traced system calls").style(text::secondary)).into()
-    };
+    let syscall_list: Element<'a, Message> =
+        if !process.trace_events.is_empty() {
+            // TODO: Allow users to sort either in increasing or decreasing time (currently it shows oldest -> newest)
+            let list = column(process.trace_events.iter().enumerate().map(
+                |(idx, syscall_event)| {
+                    syscall_list_element(
+                        &syscall_event.syscall,
+                        process.process.pid,
+                        idx,
+                        process.selected_syscall == Some(idx),
+                    )
+                },
+            ));
+            scrollable(list).into()
+        } else {
+            center(text("No traced system calls").style(text::secondary)).into()
+        };
     let syscall_list = container(syscall_list)
-        .padding(10)
-        .height(Length::Fill)
         .width(Length::Fill)
-        .align_x(Alignment::Center);
-    // .style(|theme| {
-    //     container::Style::default()
-    //         .background(theme.extended_palette().background.weakest.color)
-    // });
-    row![sidebar, syscall_list].into()
+        .height(Length::Fill);
+    let syscall_pane: Element<'a, Message> = if let Some(selected_idx) = process.selected_syscall {
+        let trace_event = &process.trace_events[selected_idx];
+        let syscall_body = container(text(trace_event.syscall.manual())).width(Length::Fill);
+        row![syscall_body, trapframe_view(trace_event)]
+            .spacing(10)
+            .into()
+    } else {
+        center("Select a system call to view details")
+            .height(Length::Fixed(300.0))
+            .into()
+    };
+    let main_pane = column![
+        syscall_list,
+        space().height(20),
+        syscall_pane,
+        space().height(10.0)
+    ];
+    row![sidebar, main_pane, space().width(Length::Fixed(10.0))].into() // TODO: Ask someone about the extra "padding" space
+}
+
+// TODO: Remove theme and fix color of guard page
+fn memory_segment_color(theme: &Theme, segment: &SegmentType) -> Color {
+    match segment {
+        SegmentType::Text => color!(0x01579B),
+        SegmentType::Data => color!(0x0D47A1),
+        SegmentType::Guard => theme.extended_palette().background.base.color,
+        SegmentType::Stack => color!(0x311B92),
+        SegmentType::StackArgs => color!(0x283593),
+        SegmentType::Heap => color!(0x4A148C),
+        SegmentType::Trapframe => color!(0x880E4F),
+        SegmentType::Trampoline => color!(0xB71C1C),
+        SegmentType::KernelText => color!(0x3E2723),
+        SegmentType::KernelData => color!(0xF57F17),
+        SegmentType::KernelStack => color!(0x1B5E20),
+        SegmentType::IO(_) => color!(0x263238),
+        SegmentType::Other(_) => unimplemented!(),
+    }
 }
 
 // TODO: On contiguous memory segments it would look nicer to have a ptr in between them.
-pub fn memory_segment_view<'a>(segment: MemoryRange) -> Element<'a, Message> {
+fn memory_segment_view<'a>(segment: MemoryRange) -> Element<'a, Message> {
     container(
         column![
             text!("0x{:010X}", segment.end())
                 .size(10)
                 .style(text::secondary),
             space().height(2),
-            text(segment.name()).size(12), // TODO: Color this?
+            text(segment.name()).size(12),
             text!("{} B", segment.size()).size(10),
             text(segment.permissions().to_string())
                 .size(10)
@@ -416,10 +567,10 @@ pub fn memory_segment_view<'a>(segment: MemoryRange) -> Element<'a, Message> {
     )
     .width(Length::Fill)
     .style(container::bordered_box)
-    .style(|theme| {
+    .style(move |theme| {
         let palette = theme.extended_palette();
         container::Style::default()
-            .background(palette.background.base.color)
+            .background(memory_segment_color(theme, segment.segment_type()))
             .border(Border {
                 color: if palette.is_dark {
                     Color::WHITE
@@ -452,21 +603,21 @@ pub fn memory_view<'a>(process: &'a TracedProcess) -> Element<'a, Message> {
                     memory_layout_view(memory.layout().into_iter().rev()),
                 ]
                 .align_x(Alignment::Center)
-                .spacing(20),
-                space::horizontal(),
-                column![
-                    text("Virtual Kernel Memory"),
-                    memory_layout_view(memory.layout_kernel().into_iter().rev())
-                ]
-                .align_x(Alignment::Center)
-                .spacing(20),
+                .spacing(15),
                 space::horizontal(),
                 column![
                     text("Physical Memory"),
                     memory_layout_view(memory.layout_physical().into_iter().rev())
                 ]
                 .align_x(Alignment::Center)
-                .spacing(20),
+                .spacing(15),
+                space::horizontal(),
+                column![
+                    text("Virtual Kernel Memory"),
+                    memory_layout_view(memory.layout_kernel().into_iter().rev())
+                ]
+                .align_x(Alignment::Center)
+                .spacing(15),
                 space::horizontal(),
             ]
             .into();

@@ -1,5 +1,6 @@
 use std::{fmt, io};
 
+use strum::IntoStaticStr;
 use tokio_util::bytes::Buf;
 
 const MEMINFO_SZ: usize = 128;
@@ -110,11 +111,40 @@ impl fmt::Display for AddressSpace {
     }
 }
 
+#[derive(Clone, IntoStaticStr)]
+#[strum(serialize_all = "title_case")]
+pub enum SegmentType {
+    Text,
+    Data,
+    Guard,
+    Stack,
+    StackArgs,
+    Heap,
+    Trapframe,
+    Trampoline,
+    KernelText,
+    KernelData,
+    KernelStack,
+    IO(&'static str),
+    Other(&'static str),
+}
+
+/// Segment name.
+impl SegmentType {
+    pub fn name(&self) -> &'static str {
+        if let Self::IO(name) | Self::Other(name) = self {
+            name
+        } else {
+            self.into()
+        }
+    }
+}
+
 /// Memory segment, end range is exclusive [start, end).
 pub struct MemoryRange {
     start: u64,
     end: u64,
-    name: &'static str,
+    segment: SegmentType,
     permissions: AddressSpace,
 }
 
@@ -134,9 +164,14 @@ impl MemoryRange {
         self.end - 1
     }
 
+    /// Segment type.
+    pub fn segment_type(&self) -> &SegmentType {
+        &self.segment
+    }
+
     /// Segment name.
     pub fn name(&self) -> &'static str {
-        self.name
+        self.segment.name()
     }
 
     /// Segment permissions.
@@ -159,76 +194,74 @@ impl From<MemInfo> for MemoryInfo {
 }
 
 impl MemoryInfo {
-    fn text(&self) -> MemoryRange {
+    pub fn text(&self) -> MemoryRange {
         MemoryRange {
             start: 0,
             end: self.meminfo.va_text_end,
-            name: "Text",
+            segment: SegmentType::Text,
             permissions: AddressSpace::Virtual(true, false, true, true),
         }
     }
 
-    fn data(&self) -> MemoryRange {
+    pub fn data(&self) -> MemoryRange {
         MemoryRange {
             start: self.meminfo.va_data_start,
             end: self.meminfo.va_data_end,
-            name: "Data",
+            segment: SegmentType::Data,
             permissions: AddressSpace::Virtual(true, true, false, true),
         }
     }
 
-    // TODO: Add guard page
-    fn guard(&self) -> MemoryRange {
+    pub fn guard(&self) -> MemoryRange {
         MemoryRange {
             start: pg_round_up(self.meminfo.va_data_end - 1),
             end: pg_round_down(self.meminfo.va_stack_start), // TODO: Sanity check why we do this (in xv6 too)
-            name: "Guard",
+            segment: SegmentType::Guard,
             permissions: AddressSpace::Virtual(true, true, false, false),
         }
     }
 
-    fn stack(&self) -> MemoryRange {
+    pub fn stack(&self) -> MemoryRange {
         MemoryRange {
             start: self.meminfo.va_stack_start,
-            end: self.meminfo.va_heap_start,
-            name: "Stack",
+            end: self.meminfo.va_stack_args,
+            segment: SegmentType::Stack,
             permissions: AddressSpace::Virtual(true, true, false, true),
         }
     }
 
-    // TODO: Maybe make the "stack args" a contiguous part of the stack
-    fn stack_args(&self) -> MemoryRange {
+    pub fn stack_args(&self) -> MemoryRange {
         MemoryRange {
             start: self.meminfo.va_stack_args,
             end: self.meminfo.va_heap_start,
-            name: "Stack Args",
+            segment: SegmentType::StackArgs,
             permissions: AddressSpace::Virtual(true, true, false, true),
         }
     }
 
-    fn heap(&self) -> MemoryRange {
+    pub fn heap(&self) -> MemoryRange {
         MemoryRange {
             start: self.meminfo.va_heap_start,
             end: self.meminfo.va_heap_end,
-            name: "Heap",
+            segment: SegmentType::Heap,
             permissions: AddressSpace::Virtual(true, true, false, true),
         }
     }
 
-    fn trapframe(&self) -> MemoryRange {
+    pub fn trapframe() -> MemoryRange {
         MemoryRange {
             start: TRAPFRAME,
             end: TRAMPOLINE,
-            name: "Trapframe",
+            segment: SegmentType::Trapframe,
             permissions: AddressSpace::Virtual(true, true, false, false),
         }
     }
 
-    fn trampoline(&self) -> MemoryRange {
+    pub fn trampoline() -> MemoryRange {
         MemoryRange {
             start: TRAMPOLINE,
             end: MAXVA,
-            name: "Trampoline",
+            segment: SegmentType::Trampoline,
             permissions: AddressSpace::Virtual(true, false, true, false),
         }
     }
@@ -242,116 +275,115 @@ impl MemoryInfo {
             self.stack(),
             self.stack_args(),
             self.heap(),
-            self.trapframe(),
-            self.trampoline(),
+            Self::trapframe(),
+            Self::trampoline(),
         ]
     }
 
-    fn stack_physical(&self) -> MemoryRange {
+    pub fn stack_physical(&self) -> MemoryRange {
         MemoryRange {
             start: self.meminfo.pa_stack_start,
-            end: self.meminfo.pa_stack_end,
-            name: "Stack",
+            end: self.meminfo.pa_stack_args,
+            segment: SegmentType::Stack,
             permissions: AddressSpace::Physical,
         }
     }
 
-    // TODO: Maybe make the "stack args" a contiguous part of the stack
-    fn stack_args_physical(&self) -> MemoryRange {
+    pub fn stack_args_physical(&self) -> MemoryRange {
         MemoryRange {
             start: self.meminfo.pa_stack_args,
             end: self.meminfo.pa_stack_end,
-            name: "Stack Args",
+            segment: SegmentType::StackArgs,
             permissions: AddressSpace::Physical,
         }
     }
 
-    fn trapframe_physical(&self) -> MemoryRange {
+    pub fn trapframe_physical(&self) -> MemoryRange {
         MemoryRange {
             start: self.meminfo.pa_trapframe_start,
             end: self.meminfo.pa_trapframe_start + PGSIZE,
-            name: "Trapframe",
+            segment: SegmentType::Trapframe,
             permissions: AddressSpace::Physical,
         }
     }
 
-    fn trampoline_physical(&self) -> MemoryRange {
+    pub fn trampoline_physical(&self) -> MemoryRange {
         MemoryRange {
             start: self.meminfo.pa_trampoline_start,
             end: self.meminfo.pa_trampoline_start + PGSIZE,
-            name: "Trampoline",
+            segment: SegmentType::Trampoline,
             permissions: AddressSpace::Physical,
         }
     }
 
-    fn kernel_stack(&self) -> MemoryRange {
+    pub fn kernel_stack(&self) -> MemoryRange {
         MemoryRange {
             start: self.meminfo.va_kstack_start,
             end: self.meminfo.va_kstack_start + PGSIZE,
-            name: "Kernel Stack",
+            segment: SegmentType::KernelStack,
             permissions: AddressSpace::Virtual(true, true, false, false),
         }
     }
 
-    fn kernel_stack_physical(&self) -> MemoryRange {
+    pub fn kernel_stack_physical(&self) -> MemoryRange {
         MemoryRange {
             start: self.meminfo.pa_kstack_start,
             end: self.meminfo.pa_kstack_start + PGSIZE,
-            name: "Kernel Stack",
+            segment: SegmentType::KernelStack,
             permissions: AddressSpace::Physical,
         }
     }
 
-    fn kernel_plic() -> MemoryRange {
+    pub fn kernel_plic() -> MemoryRange {
         MemoryRange {
             start: PLIC,
             end: PLIC + 0x4000000,
-            name: "PLIC",
+            segment: SegmentType::IO("PLIC"),
             permissions: AddressSpace::Both(true, true, false, false),
         }
     }
 
-    fn kernel_uart0() -> MemoryRange {
+    pub fn kernel_uart0() -> MemoryRange {
         MemoryRange {
             start: UART0,
             end: UART0 + PGSIZE,
-            name: "UART0",
+            segment: SegmentType::IO("UART0"),
             permissions: AddressSpace::Both(true, true, false, false),
         }
     }
 
-    fn kernel_virtio0() -> MemoryRange {
+    pub fn kernel_virtio0() -> MemoryRange {
         MemoryRange {
             start: VIRTIO0,
             end: VIRTIO0 + PGSIZE,
-            name: "VIRTIO0",
+            segment: SegmentType::IO("VIRTIO0"),
             permissions: AddressSpace::Both(true, true, false, false),
         }
     }
 
-    fn kernel_virtio1() -> MemoryRange {
+    pub fn kernel_virtio1() -> MemoryRange {
         MemoryRange {
             start: VIRTIO1,
             end: VIRTIO1 + PGSIZE,
-            name: "VIRTIO1",
+            segment: SegmentType::IO("VIRTIO1"),
             permissions: AddressSpace::Both(true, true, false, false),
         }
     }
 
-    fn kernel_text(&self) -> MemoryRange {
+    pub fn kernel_text(&self) -> MemoryRange {
         MemoryRange {
             start: KERNBASE,
             end: self.meminfo.etext,
-            name: "Kernel Text",
+            segment: SegmentType::KernelText,
             permissions: AddressSpace::Both(true, false, true, false),
         }
     }
 
-    fn kernel_data(&self) -> MemoryRange {
+    pub fn kernel_data(&self) -> MemoryRange {
         MemoryRange {
             start: self.meminfo.etext,
             end: self.meminfo.end,
-            name: "Kernel Data",
+            segment: SegmentType::KernelData,
             permissions: AddressSpace::Both(true, true, false, false),
         }
     }
@@ -360,12 +392,12 @@ impl MemoryInfo {
     /// Kernel virtual memory layout (segments are ordered low to high).
     pub fn layout_kernel(&self) -> Vec<MemoryRange> {
         let mut kernel_ranges = vec![
-            MemoryInfo::kernel_plic(),
-            MemoryInfo::kernel_uart0(),
-            MemoryInfo::kernel_virtio0(),
-            MemoryInfo::kernel_virtio1(),
+            Self::kernel_plic(),
+            Self::kernel_uart0(),
+            Self::kernel_virtio0(),
+            Self::kernel_virtio1(),
             self.kernel_text(),
-            self.trampoline(),
+            Self::trampoline(),
             self.kernel_data(),
             self.kernel_stack(),
         ];
@@ -376,10 +408,10 @@ impl MemoryInfo {
     /// Physical memory layout (segments are ordered low to high).
     pub fn layout_physical(&self) -> Vec<MemoryRange> {
         let mut physical_ranges = vec![
-            MemoryInfo::kernel_plic(),
-            MemoryInfo::kernel_uart0(),
-            MemoryInfo::kernel_virtio0(),
-            MemoryInfo::kernel_virtio1(),
+            Self::kernel_plic(),
+            Self::kernel_uart0(),
+            Self::kernel_virtio0(),
+            Self::kernel_virtio1(),
             self.kernel_text(),
             self.kernel_data(),
             self.trampoline_physical(),
